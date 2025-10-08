@@ -18,11 +18,26 @@ mod mesh;
 
 pub use mesh::*;
 
-struct Entity {
-    world: glam::Mat4,
-    rotation_speed: f32,
+struct Transform {
+    matrix: glam::Mat4,
+}
+
+impl Transform {
+    const fn new(matrix: glam::Mat4) -> Self {
+        Self { matrix }
+    }
+}
+
+struct RotationSpeed(f32);
+
+struct Material {
     color: glam::Vec4,
-    mesh: Mesh,
+}
+
+impl Material {
+    const fn new(color: glam::Vec4) -> Self {
+        Self { color }
+    }
 }
 
 struct Light {
@@ -75,8 +90,6 @@ struct Pass {
 }
 
 struct Example {
-    entities: Vec<Entity>,
-    lights: Vec<Light>,
     lights_are_dirty: bool,
     shadow_pass: Pass,
     forward_pass: Pass,
@@ -85,6 +98,7 @@ struct Example {
     light_storage_buf: wgpu::Buffer,
     entity_uniform_buf: wgpu::Buffer,
     shadow_target_views: Vec<wgpu::TextureView>,
+    world: hecs::World,
 }
 
 impl Example {
@@ -131,6 +145,8 @@ impl Example {
     }
 
     fn new(adapter: &wgpu::Adapter, gpu: &Gpu) -> Self {
+        let mut world = hecs::World::new();
+
         let supports_storage_resources = adapter
             .get_downlevel_capabilities()
             .flags
@@ -191,27 +207,25 @@ impl Example {
             mapped_at_creation: false,
         });
 
-        let mut entities = vec![{
-            Entity {
-                world: glam::Mat4::IDENTITY,
-                rotation_speed: 0.0,
-                color: glam::Vec4::ONE,
-                mesh: plane_mesh,
-            }
-        }];
+        world.spawn((
+            Transform::new(glam::Mat4::IDENTITY),
+            RotationSpeed(0.0),
+            Material::new(glam::Vec4::ONE),
+            plane_mesh,
+        ));
 
         for cube in cube_descs.iter() {
-            let world = glam::Mat4::from_scale_rotation_translation(
+            let matrix = glam::Mat4::from_scale_rotation_translation(
                 glam::Vec3::splat(cube.scale),
                 glam::Quat::from_axis_angle(cube.offset.normalize(), cube.angle * PI / 180.),
                 cube.offset,
             );
-            entities.push(Entity {
-                world,
-                rotation_speed: cube.rotation,
-                color: glam::Vec4::new(0.0, 1.0, 0.0, 1.0),
-                mesh: cube_mesh.clone(),
-            });
+            world.spawn((
+                Transform::new(matrix),
+                RotationSpeed(cube.rotation),
+                Material::new(glam::Vec4::new(0.0, 1.0, 0.0, 1.0)),
+                cube_mesh.clone(),
+            ));
         }
 
         let local_bind_group_layout =
@@ -283,20 +297,19 @@ impl Example {
             })
             .collect::<Vec<_>>();
 
-        let lights = vec![
-            Light {
-                pos: glam::Vec3::new(7.0, -5.0, 10.0),
-                color: glam::Vec3::new(0.5, 1.0, 0.5),
-                fov: 60.0,
-                depth: 1.0..20.0,
-            },
-            Light {
-                pos: glam::Vec3::new(-5.0, 7.0, 10.0),
-                color: glam::Vec3::new(1.0, 0.5, 0.5),
-                fov: 45.0,
-                depth: 1.0..20.0,
-            },
-        ];
+        world.spawn((Light {
+            pos: glam::Vec3::new(7.0, -5.0, 10.0),
+            color: glam::Vec3::new(0.5, 1.0, 0.5),
+            fov: 60.0,
+            depth: 1.0..20.0,
+        },));
+
+        world.spawn((Light {
+            pos: glam::Vec3::new(-5.0, 7.0, 10.0),
+            color: glam::Vec3::new(1.0, 0.5, 0.5),
+            fov: 45.0,
+            depth: 1.0..20.0,
+        },));
 
         let light_uniform_size = (Self::MAX_LIGHTS * size_of::<LightRaw>()) as wgpu::BufferAddress;
         let light_storage_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -475,9 +488,10 @@ impl Example {
 
             let mx_total =
                 Self::generate_matrix(gpu.config.width as f32 / gpu.config.height as f32);
+            let num_lights = world.query::<&Light>().iter().count();
             let forward_uniforms = GlobalUniforms {
                 proj: mx_total.to_cols_array_2d(),
-                num_lights: [lights.len() as u32, 0, 0, 0],
+                num_lights: [num_lights as u32, 0, 0, 0],
             };
             let uniform_buf = gpu
                 .device
@@ -560,8 +574,6 @@ impl Example {
         let forward_depth = Self::create_depth_texture(&gpu.config, &gpu.device);
 
         Self {
-            entities,
-            lights,
             lights_are_dirty: true,
             shadow_pass,
             forward_pass,
@@ -570,6 +582,7 @@ impl Example {
             entity_uniform_buf,
             entity_bind_group,
             shadow_target_views,
+            world,
         }
     }
 
@@ -589,8 +602,16 @@ impl Example {
     fn render(&mut self, view: &wgpu::TextureView, gpu: &Gpu) {
         // update uniforms
 
+        let num_lights = self.world.query::<&Light>().iter().count();
+        gpu.queue.write_buffer(
+            &self.forward_pass.uniform_buf,
+            64,
+            bytemuck::cast_slice(&[num_lights as u32]),
+        );
+
         let entity_uniform_size = size_of::<EntityUniforms>() as wgpu::BufferAddress;
-        let num_entities = self.entities.len() as wgpu::BufferAddress;
+        let num_entities =
+            self.world.query::<(&Transform, &Material)>().iter().count() as wgpu::BufferAddress;
         // Make the `uniform_alignment` >= `entity_uniform_size` and aligned to `min_uniform_buffer_offset_alignment`.
         let uniform_alignment = {
             let alignment =
@@ -607,18 +628,28 @@ impl Example {
             });
         }
 
-        for (i, entity) in self.entities.iter_mut().enumerate() {
-            if entity.rotation_speed != 0.0 {
-                let rotation = glam::Mat4::from_rotation_x(entity.rotation_speed * PI / 180.);
-                entity.world *= rotation;
+        for (_, (transform, rotation_speed)) in
+            self.world.query_mut::<(&mut Transform, &RotationSpeed)>()
+        {
+            if rotation_speed.0 != 0.0 {
+                let rotation = glam::Mat4::from_rotation_x(rotation_speed.0 * PI / 180.);
+                transform.matrix *= rotation;
             }
+        }
+
+        for (i, (_, (transform, material))) in self
+            .world
+            .query::<(&Transform, &Material)>()
+            .iter()
+            .enumerate()
+        {
             let data = EntityUniforms {
-                model: entity.world.to_cols_array_2d(),
+                model: transform.matrix.to_cols_array_2d(),
                 color: [
-                    entity.color.x,
-                    entity.color.y,
-                    entity.color.z,
-                    entity.color.w,
+                    material.color.x,
+                    material.color.y,
+                    material.color.z,
+                    material.color.w,
                 ],
             };
             gpu.queue.write_buffer(
@@ -630,7 +661,7 @@ impl Example {
 
         if self.lights_are_dirty {
             self.lights_are_dirty = false;
-            for (i, light) in self.lights.iter().enumerate() {
+            for (i, (_, light)) in self.world.query::<&Light>().iter().enumerate() {
                 gpu.queue.write_buffer(
                     &self.light_storage_buf,
                     (i * size_of::<LightRaw>()) as wgpu::BufferAddress,
@@ -644,7 +675,7 @@ impl Example {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         encoder.push_debug_group("shadow passes");
-        for (i, light) in self.lights.iter().enumerate() {
+        for (i, (_, light)) in self.world.query::<&Light>().iter().enumerate() {
             encoder.push_debug_group(&format!(
                 "shadow pass {} (light at position {:?})",
                 i, light.pos
@@ -682,13 +713,13 @@ impl Example {
                 pass.set_pipeline(&self.shadow_pass.pipeline);
                 pass.set_bind_group(0, &self.shadow_pass.bind_group, &[]);
 
-                for (i, entity) in self.entities.iter().enumerate() {
+                for (i, (_, mesh)) in self.world.query::<&Mesh>().iter().enumerate() {
                     pass.set_bind_group(
                         1,
                         &self.entity_bind_group,
                         &[i as wgpu::DynamicOffset * uniform_alignment as wgpu::DynamicOffset],
                     );
-                    entity.mesh.draw(&mut pass);
+                    mesh.draw(&mut pass);
                 }
             }
 
@@ -729,13 +760,13 @@ impl Example {
             pass.set_pipeline(&self.forward_pass.pipeline);
             pass.set_bind_group(0, &self.forward_pass.bind_group, &[]);
 
-            for (i, entity) in self.entities.iter().enumerate() {
+            for (i, (_, mesh)) in self.world.query::<&Mesh>().iter().enumerate() {
                 pass.set_bind_group(
                     1,
                     &self.entity_bind_group,
                     &[i as wgpu::DynamicOffset * uniform_alignment as wgpu::DynamicOffset],
                 );
-                entity.mesh.draw(&mut pass);
+                mesh.draw(&mut pass);
             }
         }
         encoder.pop_debug_group();

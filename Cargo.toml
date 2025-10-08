@@ -12,3 +12,4 @@ log = "0.4.28"
 wgpu = "27.0.1"
 bytemuck = { version = "1.24.0", features = ["derive"] }
 glam = "0.30.8"
+hecs = "0.10.5"
