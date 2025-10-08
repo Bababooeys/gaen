@@ -30,7 +30,6 @@ struct Light {
     color: glam::Vec3,
     fov: f32,
     depth: Range<f32>,
-    target_view: wgpu::TextureView,
 }
 
 #[repr(C)]
@@ -85,6 +84,7 @@ struct Example {
     entity_bind_group: wgpu::BindGroup,
     light_storage_buf: wgpu::Buffer,
     entity_uniform_buf: wgpu::Buffer,
+    shadow_target_views: Vec<wgpu::TextureView>,
 }
 
 impl Example {
@@ -267,9 +267,9 @@ impl Example {
         });
         let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut shadow_target_views = (0..2)
+        let shadow_target_views = (0..Self::MAX_LIGHTS)
             .map(|i| {
-                Some(shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+                shadow_texture.create_view(&wgpu::TextureViewDescriptor {
                     label: Some("shadow"),
                     format: None,
                     dimension: Some(wgpu::TextureViewDimension::D2),
@@ -279,7 +279,7 @@ impl Example {
                     mip_level_count: None,
                     base_array_layer: i as u32,
                     array_layer_count: Some(1),
-                }))
+                })
             })
             .collect::<Vec<_>>();
 
@@ -289,14 +289,12 @@ impl Example {
                 color: glam::Vec3::new(0.5, 1.0, 0.5),
                 fov: 60.0,
                 depth: 1.0..20.0,
-                target_view: shadow_target_views[0].take().unwrap(),
             },
             Light {
                 pos: glam::Vec3::new(-5.0, 7.0, 10.0),
                 color: glam::Vec3::new(1.0, 0.5, 0.5),
                 fov: 45.0,
                 depth: 1.0..20.0,
-                target_view: shadow_target_views[1].take().unwrap(),
             },
         ];
 
@@ -571,6 +569,7 @@ impl Example {
             light_storage_buf,
             entity_uniform_buf,
             entity_bind_group,
+            shadow_target_views,
         }
     }
 
@@ -667,7 +666,10 @@ impl Example {
                     label: None,
                     color_attachments: &[],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &light.target_view,
+                        view: self
+                            .shadow_target_views
+                            .get(i)
+                            .expect("Lights count more than MAX_LIGHTS"),
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
                             store: wgpu::StoreOp::Store,
@@ -795,7 +797,7 @@ impl AppState {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_capabilities.present_modes[0],
+            present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
             alpha_mode: surface_capabilities.alpha_modes[0],
             view_formats: vec![],
