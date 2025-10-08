@@ -21,14 +21,14 @@ pub use mesh::*;
 struct Entity {
     world: glam::Mat4,
     rotation_speed: f32,
-    color: wgpu::Color,
+    color: glam::Vec4,
     mesh: Mesh,
     uniform_offset: wgpu::DynamicOffset,
 }
 
 struct Light {
     pos: glam::Vec3,
-    color: wgpu::Color,
+    color: glam::Vec3,
     fov: f32,
     depth: Range<f32>,
     target_view: wgpu::TextureView,
@@ -51,12 +51,7 @@ impl Light {
         LightRaw {
             proj: view_proj.to_cols_array_2d(),
             pos: [self.pos.x, self.pos.y, self.pos.z, 1.0],
-            color: [
-                self.color.r as f32,
-                self.color.g as f32,
-                self.color.b as f32,
-                1.0,
-            ],
+            color: [self.color.x, self.color.y, self.color.z, 1.0],
         }
     }
 }
@@ -201,7 +196,7 @@ impl Example {
             Entity {
                 world: glam::Mat4::IDENTITY,
                 rotation_speed: 0.0,
-                color: wgpu::Color::WHITE,
+                color: glam::Vec4::ONE,
                 mesh: plane_mesh,
                 uniform_offset: 0,
             }
@@ -216,7 +211,7 @@ impl Example {
             entities.push(Entity {
                 world,
                 rotation_speed: cube.rotation,
-                color: wgpu::Color::GREEN,
+                color: glam::Vec4::new(0.0, 1.0, 0.0, 1.0),
                 mesh: cube_mesh.clone(),
                 uniform_offset: ((i + 1) * uniform_alignment as usize) as _,
             });
@@ -294,24 +289,14 @@ impl Example {
         let lights = vec![
             Light {
                 pos: glam::Vec3::new(7.0, -5.0, 10.0),
-                color: wgpu::Color {
-                    r: 0.5,
-                    g: 1.0,
-                    b: 0.5,
-                    a: 1.0,
-                },
+                color: glam::Vec3::new(0.5, 1.0, 0.5),
                 fov: 60.0,
                 depth: 1.0..20.0,
                 target_view: shadow_target_views[0].take().unwrap(),
             },
             Light {
                 pos: glam::Vec3::new(-5.0, 7.0, 10.0),
-                color: wgpu::Color {
-                    r: 1.0,
-                    g: 0.5,
-                    b: 0.5,
-                    a: 1.0,
-                },
+                color: glam::Vec3::new(1.0, 0.5, 0.5),
                 fov: 45.0,
                 depth: 1.0..20.0,
                 target_view: shadow_target_views[1].take().unwrap(),
@@ -615,10 +600,10 @@ impl Example {
             let data = EntityUniforms {
                 model: entity.world.to_cols_array_2d(),
                 color: [
-                    entity.color.r as f32,
-                    entity.color.g as f32,
-                    entity.color.b as f32,
-                    entity.color.a as f32,
+                    entity.color.x,
+                    entity.color.y,
+                    entity.color.z,
+                    entity.color.w,
                 ],
             };
             gpu.queue.write_buffer(
