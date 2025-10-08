@@ -23,7 +23,6 @@ struct Entity {
     rotation_speed: f32,
     color: glam::Vec4,
     mesh: Mesh,
-    uniform_offset: wgpu::DynamicOffset,
 }
 
 struct Light {
@@ -198,11 +197,10 @@ impl Example {
                 rotation_speed: 0.0,
                 color: glam::Vec4::ONE,
                 mesh: plane_mesh,
-                uniform_offset: 0,
             }
         }];
 
-        for (i, cube) in cube_descs.iter().enumerate() {
+        for cube in cube_descs.iter() {
             let world = glam::Mat4::from_scale_rotation_translation(
                 glam::Vec3::splat(cube.scale),
                 glam::Quat::from_axis_angle(cube.offset.normalize(), cube.angle * PI / 180.),
@@ -213,7 +211,6 @@ impl Example {
                 rotation_speed: cube.rotation,
                 color: glam::Vec4::new(0.0, 1.0, 0.0, 1.0),
                 mesh: cube_mesh.clone(),
-                uniform_offset: ((i + 1) * uniform_alignment as usize) as _,
             });
         }
 
@@ -592,7 +589,26 @@ impl Example {
 
     fn render(&mut self, view: &wgpu::TextureView, gpu: &Gpu) {
         // update uniforms
-        for entity in self.entities.iter_mut() {
+
+        let entity_uniform_size = size_of::<EntityUniforms>() as wgpu::BufferAddress;
+        let num_entities = self.entities.len() as wgpu::BufferAddress;
+        // Make the `uniform_alignment` >= `entity_uniform_size` and aligned to `min_uniform_buffer_offset_alignment`.
+        let uniform_alignment = {
+            let alignment =
+                gpu.device.limits().min_uniform_buffer_offset_alignment as wgpu::BufferAddress;
+            wgpu::util::align_to(entity_uniform_size, alignment)
+        };
+        if self.entity_uniform_buf.size() < uniform_alignment * num_entities {
+            let new_size = uniform_alignment * num_entities * 2;
+            self.entity_uniform_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: new_size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+
+        for (i, entity) in self.entities.iter_mut().enumerate() {
             if entity.rotation_speed != 0.0 {
                 let rotation = glam::Mat4::from_rotation_x(entity.rotation_speed * PI / 180.);
                 entity.world *= rotation;
@@ -608,7 +624,7 @@ impl Example {
             };
             gpu.queue.write_buffer(
                 &self.entity_uniform_buf,
-                entity.uniform_offset as wgpu::BufferAddress,
+                i as wgpu::BufferAddress * uniform_alignment,
                 bytemuck::bytes_of(&data),
             );
         }
@@ -664,8 +680,12 @@ impl Example {
                 pass.set_pipeline(&self.shadow_pass.pipeline);
                 pass.set_bind_group(0, &self.shadow_pass.bind_group, &[]);
 
-                for entity in &self.entities {
-                    pass.set_bind_group(1, &self.entity_bind_group, &[entity.uniform_offset]);
+                for (i, entity) in self.entities.iter().enumerate() {
+                    pass.set_bind_group(
+                        1,
+                        &self.entity_bind_group,
+                        &[i as wgpu::DynamicOffset * uniform_alignment as wgpu::DynamicOffset],
+                    );
                     entity.mesh.draw(&mut pass);
                 }
             }
@@ -707,8 +727,12 @@ impl Example {
             pass.set_pipeline(&self.forward_pass.pipeline);
             pass.set_bind_group(0, &self.forward_pass.bind_group, &[]);
 
-            for entity in &self.entities {
-                pass.set_bind_group(1, &self.entity_bind_group, &[entity.uniform_offset]);
+            for (i, entity) in self.entities.iter().enumerate() {
+                pass.set_bind_group(
+                    1,
+                    &self.entity_bind_group,
+                    &[i as wgpu::DynamicOffset * uniform_alignment as wgpu::DynamicOffset],
+                );
                 entity.mesh.draw(&mut pass);
             }
         }
