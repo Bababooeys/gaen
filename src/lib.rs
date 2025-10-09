@@ -1,5 +1,5 @@
 use std::{
-    f32::consts::{FRAC_PI_4, PI},
+    f32::consts::{FRAC_PI_4},
     ops::Range,
     sync::Arc,
 };
@@ -16,35 +16,35 @@ use winit::{
 
 mod mesh;
 
+pub use glam::*;
+pub use hecs::*;
 pub use mesh::*;
 
-struct Transform {
-    matrix: glam::Mat4,
+pub struct Transform {
+    pub matrix: glam::Mat4,
 }
 
 impl Transform {
-    const fn new(matrix: glam::Mat4) -> Self {
+    pub const fn new(matrix: glam::Mat4) -> Self {
         Self { matrix }
     }
 }
 
-struct RotationSpeed(f32);
-
-struct Material {
-    color: glam::Vec4,
+pub struct Material {
+    pub color: glam::Vec4,
 }
 
 impl Material {
-    const fn new(color: glam::Vec4) -> Self {
+    pub const fn new(color: glam::Vec4) -> Self {
         Self { color }
     }
 }
 
-struct Light {
-    pos: glam::Vec3,
-    color: glam::Vec3,
-    fov: f32,
-    depth: Range<f32>,
+pub struct Light {
+    pub pos: glam::Vec3,
+    pub color: glam::Vec3,
+    pub fov: f32,
+    pub depth: Range<f32>,
 }
 
 #[repr(C)]
@@ -59,7 +59,7 @@ impl Light {
     fn to_raw(&self) -> LightRaw {
         let view = glam::Mat4::look_at_rh(self.pos, glam::Vec3::ZERO, glam::Vec3::Z);
         let projection =
-            glam::Mat4::perspective_rh(self.fov * PI / 180., 1.0, self.depth.start, self.depth.end);
+            glam::Mat4::perspective_rh(self.fov, 1.0, self.depth.start, self.depth.end);
         let view_proj = projection * view;
         LightRaw {
             proj: view_proj.to_cols_array_2d(),
@@ -89,7 +89,7 @@ struct Pass {
     uniform_buf: wgpu::Buffer,
 }
 
-struct Example {
+struct Renderer {
     lights_are_dirty: bool,
     shadow_pass: Pass,
     forward_pass: Pass,
@@ -98,10 +98,9 @@ struct Example {
     light_storage_buf: wgpu::Buffer,
     entity_uniform_buf: wgpu::Buffer,
     shadow_target_views: Vec<wgpu::TextureView>,
-    world: hecs::World,
 }
 
-impl Example {
+impl Renderer {
     const FEATURES: wgpu::Features = wgpu::Features::DEPTH_CLIP_CONTROL;
     const MAX_LIGHTS: usize = 10;
     const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -144,9 +143,7 @@ impl Example {
         depth_texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    fn new(adapter: &wgpu::Adapter, gpu: &Gpu) -> Self {
-        let mut world = hecs::World::new();
-
+    fn new(adapter: &wgpu::Adapter, gpu: &Gpu, world: &mut World) -> Self {
         let supports_storage_resources = adapter
             .get_downlevel_capabilities()
             .flags
@@ -155,44 +152,8 @@ impl Example {
 
         // Create the vertex and index buffers
         let vertex_size = size_of::<Vertex>();
-        let cube_mesh = Cuboid::new(2, 2, 2).into_mesh(gpu);
-        let plane_mesh = Plane::new(16, 16).into_mesh(gpu);
-
-        struct CubeDesc {
-            offset: glam::Vec3,
-            angle: f32,
-            scale: f32,
-            rotation: f32,
-        }
-        let cube_descs = [
-            CubeDesc {
-                offset: glam::Vec3::new(-2.0, -2.0, 2.0),
-                angle: 10.0,
-                scale: 0.7,
-                rotation: 0.1,
-            },
-            CubeDesc {
-                offset: glam::Vec3::new(2.0, -2.0, 2.0),
-                angle: 50.0,
-                scale: 1.3,
-                rotation: 0.2,
-            },
-            CubeDesc {
-                offset: glam::Vec3::new(-2.0, 2.0, 2.0),
-                angle: 140.0,
-                scale: 1.1,
-                rotation: 0.3,
-            },
-            CubeDesc {
-                offset: glam::Vec3::new(2.0, 2.0, 2.0),
-                angle: 210.0,
-                scale: 0.9,
-                rotation: 0.4,
-            },
-        ];
-
         let entity_uniform_size = size_of::<EntityUniforms>() as wgpu::BufferAddress;
-        let num_entities = 1 + cube_descs.len() as wgpu::BufferAddress;
+        let num_entities = 5;
         // Make the `uniform_alignment` >= `entity_uniform_size` and aligned to `min_uniform_buffer_offset_alignment`.
         let uniform_alignment = {
             let alignment =
@@ -206,27 +167,6 @@ impl Example {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        world.spawn((
-            Transform::new(glam::Mat4::IDENTITY),
-            RotationSpeed(0.0),
-            Material::new(glam::Vec4::ONE),
-            plane_mesh,
-        ));
-
-        for cube in cube_descs.iter() {
-            let matrix = glam::Mat4::from_scale_rotation_translation(
-                glam::Vec3::splat(cube.scale),
-                glam::Quat::from_axis_angle(cube.offset.normalize(), cube.angle * PI / 180.),
-                cube.offset,
-            );
-            world.spawn((
-                Transform::new(matrix),
-                RotationSpeed(cube.rotation),
-                Material::new(glam::Vec4::new(0.0, 1.0, 0.0, 1.0)),
-                cube_mesh.clone(),
-            ));
-        }
 
         let local_bind_group_layout =
             gpu.device
@@ -296,20 +236,6 @@ impl Example {
                 })
             })
             .collect::<Vec<_>>();
-
-        world.spawn((Light {
-            pos: glam::Vec3::new(7.0, -5.0, 10.0),
-            color: glam::Vec3::new(0.5, 1.0, 0.5),
-            fov: 60.0,
-            depth: 1.0..20.0,
-        },));
-
-        world.spawn((Light {
-            pos: glam::Vec3::new(-5.0, 7.0, 10.0),
-            color: glam::Vec3::new(1.0, 0.5, 0.5),
-            fov: 45.0,
-            depth: 1.0..20.0,
-        },));
 
         let light_uniform_size = (Self::MAX_LIGHTS * size_of::<LightRaw>()) as wgpu::BufferAddress;
         let light_storage_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -582,7 +508,6 @@ impl Example {
             entity_uniform_buf,
             entity_bind_group,
             shadow_target_views,
-            world,
         }
     }
 
@@ -599,10 +524,10 @@ impl Example {
         self.forward_depth = Self::create_depth_texture(&gpu.config, &gpu.device);
     }
 
-    fn render(&mut self, view: &wgpu::TextureView, gpu: &Gpu) {
+    fn render(&mut self, view: &wgpu::TextureView, gpu: &Gpu, world: &mut hecs::World) {
         // update uniforms
 
-        let num_lights = self.world.query::<&Light>().iter().count();
+        let num_lights = world.query::<&Light>().iter().count();
         gpu.queue.write_buffer(
             &self.forward_pass.uniform_buf,
             64,
@@ -611,7 +536,7 @@ impl Example {
 
         let entity_uniform_size = size_of::<EntityUniforms>() as wgpu::BufferAddress;
         let num_entities =
-            self.world.query::<(&Transform, &Material)>().iter().count() as wgpu::BufferAddress;
+            world.query::<(&Transform, &Material)>().iter().count() as wgpu::BufferAddress;
         // Make the `uniform_alignment` >= `entity_uniform_size` and aligned to `min_uniform_buffer_offset_alignment`.
         let uniform_alignment = {
             let alignment =
@@ -628,20 +553,8 @@ impl Example {
             });
         }
 
-        for (_, (transform, rotation_speed)) in
-            self.world.query_mut::<(&mut Transform, &RotationSpeed)>()
-        {
-            if rotation_speed.0 != 0.0 {
-                let rotation = glam::Mat4::from_rotation_x(rotation_speed.0 * PI / 180.);
-                transform.matrix *= rotation;
-            }
-        }
-
-        for (i, (_, (transform, material))) in self
-            .world
-            .query::<(&Transform, &Material)>()
-            .iter()
-            .enumerate()
+        for (i, (_, (transform, material))) in
+            world.query::<(&Transform, &Material)>().iter().enumerate()
         {
             let data = EntityUniforms {
                 model: transform.matrix.to_cols_array_2d(),
@@ -661,7 +574,7 @@ impl Example {
 
         if self.lights_are_dirty {
             self.lights_are_dirty = false;
-            for (i, (_, light)) in self.world.query::<&Light>().iter().enumerate() {
+            for (i, (_, light)) in world.query::<&Light>().iter().enumerate() {
                 gpu.queue.write_buffer(
                     &self.light_storage_buf,
                     (i * size_of::<LightRaw>()) as wgpu::BufferAddress,
@@ -675,7 +588,7 @@ impl Example {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         encoder.push_debug_group("shadow passes");
-        for (i, (_, light)) in self.world.query::<&Light>().iter().enumerate() {
+        for (i, (_, light)) in world.query::<&Light>().iter().enumerate() {
             encoder.push_debug_group(&format!(
                 "shadow pass {} (light at position {:?})",
                 i, light.pos
@@ -713,7 +626,7 @@ impl Example {
                 pass.set_pipeline(&self.shadow_pass.pipeline);
                 pass.set_bind_group(0, &self.shadow_pass.bind_group, &[]);
 
-                for (i, (_, mesh)) in self.world.query::<&Mesh>().iter().enumerate() {
+                for (i, (_, mesh)) in world.query::<&Mesh>().iter().enumerate() {
                     pass.set_bind_group(
                         1,
                         &self.entity_bind_group,
@@ -760,7 +673,7 @@ impl Example {
             pass.set_pipeline(&self.forward_pass.pipeline);
             pass.set_bind_group(0, &self.forward_pass.bind_group, &[]);
 
-            for (i, (_, mesh)) in self.world.query::<&Mesh>().iter().enumerate() {
+            for (i, (_, mesh)) in world.query::<&Mesh>().iter().enumerate() {
                 pass.set_bind_group(
                     1,
                     &self.entity_bind_group,
@@ -781,15 +694,25 @@ pub struct Gpu {
     config: wgpu::SurfaceConfiguration,
 }
 
-struct AppState {
+pub trait State {
+    fn new(gpu: &Gpu, world: &mut World) -> Self;
+    fn update(&mut self, gpu: &Gpu, world: &mut World);
+}
+
+struct AppState<S> {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     gpu: Gpu,
     is_surface_configured: bool,
-    example: Example,
+    world: World,
+    renderer: Renderer,
+    state: S,
 }
 
-impl AppState {
+impl<S> AppState<S>
+where
+    S: State,
+{
     async fn new(
         event_loop: &ActiveEventLoop,
         window_attributes: WindowAttributes,
@@ -809,7 +732,7 @@ impl AppState {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
-                required_features: Example::FEATURES,
+                required_features: Renderer::FEATURES,
                 required_limits: wgpu::Limits::defaults(),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 memory_hints: wgpu::MemoryHints::default(),
@@ -834,20 +757,26 @@ impl AppState {
             view_formats: vec![],
         };
 
+        let mut world = hecs::World::new();
+
         let gpu = Gpu {
             device,
             queue,
             config,
         };
 
-        let example = Example::new(&adapter, &gpu);
+        let renderer = Renderer::new(&adapter, &gpu, &mut world);
+
+        let state = S::new(&gpu, &mut world);
 
         Ok(Self {
             window,
             surface,
             gpu,
             is_surface_configured: false,
-            example,
+            world,
+            renderer,
+            state,
         })
     }
 
@@ -857,7 +786,7 @@ impl AppState {
             self.gpu.config.height = height;
             self.surface.configure(&self.gpu.device, &self.gpu.config);
             self.is_surface_configured = true;
-            self.example.resize(&mut self.gpu);
+            self.renderer.resize(&mut self.gpu);
         }
     }
 
@@ -875,22 +804,27 @@ impl AppState {
             return Ok(());
         }
 
+        self.state.update(&self.gpu, &mut self.world);
+
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.example.render(&view, &self.gpu);
+        self.renderer.render(&view, &self.gpu, &mut self.world);
         output.present();
         Ok(())
     }
 }
 
-struct App {
-    app_state: Option<AppState>,
+struct App<S> {
+    app_state: Option<AppState<S>>,
     result: anyhow::Result<()>,
 }
 
-impl App {
+impl<S> App<S>
+where
+    S: State,
+{
     fn new() -> Self {
         Self {
             app_state: None,
@@ -898,13 +832,16 @@ impl App {
         }
     }
 
-    fn create_app_state(&self, event_loop: &ActiveEventLoop) -> anyhow::Result<AppState> {
+    fn create_app_state(&self, event_loop: &ActiveEventLoop) -> anyhow::Result<AppState<S>> {
         let window_attributes = Window::default_attributes();
         pollster::block_on(AppState::new(event_loop, window_attributes))
     }
 }
 
-impl ApplicationHandler for App {
+impl<S> ApplicationHandler for App<S>
+where
+    S: State,
+{
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match self.create_app_state(event_loop) {
             Ok(app_state) => self.app_state = Some(app_state),
@@ -949,10 +886,13 @@ impl ApplicationHandler for App {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run<S>() -> anyhow::Result<()>
+where
+    S: State,
+{
     env_logger::init();
     let event_loop = EventLoop::new()?;
-    let mut app = App::new();
+    let mut app = App::<S>::new();
     event_loop.run_app(&mut app)?;
     app.result
 }
